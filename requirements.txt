@@ -3,3 +3,8 @@ Pillow
 torch>=1.2
 tabulate
 tqdm
+
+pytorch-lightning
+wfdb
+scipy
+sklearn
