@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
+import torchmetrics
 
 import wfdb
 
@@ -102,6 +103,7 @@ class CNN_RNN(pl.LightningModule):
         # self.layer_2a_size = config["layer_2a_size"]
         # self.layer_2b_size = config["layer_2b_size"]
         # self.layer_2p_size = config["layer_2p_size"]
+        self.f1 = torchmetrics.F1(num_classes=2, mdmc_average='global')
 
         self.conv1 = nn.Conv1d(2, 8, 3, padding=1, stride=1)
         self.conv2 = nn.Conv1d(8, 16, 3, padding=1, stride=1)
@@ -124,7 +126,7 @@ class CNN_RNN(pl.LightningModule):
         x = self.pool3(F.relu(self.conv6(F.relu(self.conv5(x)))))
         x = torch.flatten(x, 1) # flatten all dimensions except batch
         x = self.fc1(x)
-        x = F.sigmoid(self.fc2(x))
+        x = torch.sigmoid(self.fc2(x))
         return x
 
     def training_step(self, batch, batch_idx):
@@ -137,7 +139,9 @@ class CNN_RNN(pl.LightningModule):
         x, y = batch
         y_hat = self(x)
         loss = F.binary_cross_entropy(y_hat, y)
+
         self.log("val_loss", loss, prog_bar=True)
+        self.log("val_f1", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
         return loss
 
     def configure_optimizers(self):
@@ -181,5 +185,5 @@ if __name__ == '__main__':
     ecg_data = ECGDataset(metadata, preloaded_data, transform=None)
     train, val, test = get_train_test_split(ecg_data, 0.7, 0.2)
     cnn_rnn = CNN_RNN({})
-    trainer = pl.Trainer(max_epochs=3)
+    trainer = pl.Trainer(max_epochs=10)
     trainer.fit(cnn_rnn, DataLoader(train, batch_size=10), DataLoader(val))
