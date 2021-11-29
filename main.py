@@ -161,6 +161,17 @@ class CNN_RNN(pl.LightningModule):
         # self.log("val_rec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
         return loss
 
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        y_hat = self(x)
+        loss = F.binary_cross_entropy(y_hat, y)
+
+        self.log("test_loss", loss, prog_bar=True)
+        self.log("test_f1", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
+        # self.log("val_prec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
+        # self.log("val_rec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
+        return loss
+
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
@@ -201,5 +212,6 @@ if __name__ == '__main__':
     ecg_data = ECGDataset(metadata, preloaded_data, transform=None)
     train, val, test = get_train_test_split(ecg_data, 0.7, 0.2)
     cnn_rnn = CNN_RNN({})
-    trainer = pl.Trainer(max_epochs=10)
+    trainer = pl.Trainer(max_epochs=1)
     trainer.fit(cnn_rnn, DataLoader(train, batch_size=10), DataLoader(val))
+    trainer.test(cnn_rnn, DataLoader(test))
