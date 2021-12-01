@@ -108,4 +108,4 @@ data/physionet/
 cpsc2021-python-entry/
 lightning_logs/
 *.jpg
-*.cpkt
+*.ckpt
