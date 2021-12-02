@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
 import torchmetrics
-from matplotlib import pyplot as plt
 
 import wfdb
 
@@ -28,26 +27,6 @@ parser.add_argument('--restore_file', default=None,
                     help="Optional, name of the file in --model_dir containing weights to reload before \
                     training")  # 'best' or 'train'
 
-
-def scaling(X, sigma=0.1):
-    scalingFactor = np.random.normal(loc=1.0, scale=sigma, size=(1, X.shape[1]))
-    myNoise = np.matmul(np.ones((X.shape[0], 1)), scalingFactor)
-    return X * myNoise
-
-
-def shift(sig, interval=20):
-    for col in range(sig.shape[1]):
-        offset = np.random.choice(range(-interval, interval))
-        sig[:, col] += offset / 1000 
-    return sig
-
-
-def transform(sig, train=False):
-    if train:
-        if np.random.randn() > 0.5: sig = scaling(sig)
-        if np.random.randn() > 0.5: sig = shift(sig)
-    return sig
-
 class ECGDataset(Dataset):
   def __init__(self, metadata, preloaded_data, transform=None, target_transform=None):
     self.metadata = metadata
@@ -60,7 +39,6 @@ class ECGDataset(Dataset):
 
   def __getitem__(self, idx):
     entry = self.metadata[idx]
-    print(len(self.metadata))
     class_label = entry['class']
 
     sig = self.preloaded_data[entry['path']]
@@ -74,7 +52,9 @@ class ECGDataset(Dataset):
     # 50 1's / 4 seconds = 12.5 Hz
     # 75 seconds * 12.5 samples/second = 937
     # So we'll make Y 1000 long
-    label = np.array([class_label]).astype('float32')
+    label = np.zeros(1000).astype('float32')
+    if class_label == 1:
+      label = insert_ones(label, entry['af_ends'][0])
     
     if self.transform:
       sig = self.transform(sig)
@@ -82,8 +62,7 @@ class ECGDataset(Dataset):
     if self.target_transform:
       label = self.target_transform(label)
 
-    end = -1 if not entry['af_ends'] else entry['af_ends'][0]
-    return sig, label, end
+    return sig, label
 
 def insert_ones(y, end_step_x):
     """
@@ -101,7 +80,7 @@ def insert_ones(y, end_step_x):
     """
     
     end_step_y = int(end_step_x * 1000 / 15000.0)
-    for i in range(0, end_step_y + 1):
+    for i in range(end_step_y+1, end_step_y+51):
         if i < y.shape[0]:
             y[i] = 1
     
@@ -125,14 +104,11 @@ class CNN_RNN(pl.LightningModule):
         # self.layer_2b_size = config["layer_2b_size"]
         # self.layer_2p_size = config["layer_2p_size"]
         self.f1 = torchmetrics.F1(num_classes=2, mdmc_average='global')
-        self.p = torchmetrics.Precision(num_classes=2)
-        self.r = torchmetrics.Recall(num_classes=2)
         self.conv1 = nn.Conv1d(2, 8, 3, padding=1, stride=1)
         self.batch1 = nn.BatchNorm1d(8)
         self.conv2 = nn.Conv1d(8, 16, 3, padding=1, stride=1)
         self.batch2 = nn.BatchNorm1d(16)
         self.pool1 = nn.MaxPool1d(3, 3)
-        self.drop = nn.Dropout(0.2)
 
         self.conv3 = nn.Conv1d(16, 32, 3, padding=1, stride=1)
         self.batch3 = nn.BatchNorm1d(32)
@@ -148,64 +124,56 @@ class CNN_RNN(pl.LightningModule):
 
         self.fc1 = nn.Linear(71040, 1000)
         self.fc2 = nn.Linear(1000, 1000)
-        self.fc3 = nn.Linear(1000, 1)
 
         self.lstm = nn.LSTM(1666, 1000, num_layers = 2)
 
     def forward(self, x):
         x = F.relu(self.batch1(self.conv1(x)))
         x = F.relu(self.batch2(self.conv2(x)))
-        x = self.drop(x)
         x = self.pool1(x)
         x = F.relu(self.batch3(self.conv3(x)))
         x = F.relu(self.batch4(self.conv4(x)))
-        x = self.drop(x)
         x = self.pool2(x)
         x = F.relu(self.batch5(self.conv5(x)))
         x = F.relu(self.batch6(self.conv6(x)))
-        x = self.drop(x)
         x = self.pool3(x)
         x = torch.flatten(x, 1) # flatten all dimensions except batch
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = torch.sigmoid(self.fc3(x))
-
         # x, (hn, cn) = self.lstm(x)
+        x = F.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))
+
         return x
 
     def training_step(self, batch, batch_idx):
-        x, y, end = batch
+        x, y = batch
         y_hat = self(x)
-
         loss = F.binary_cross_entropy(y_hat, y)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        x, y, end = batch
+        x, y = batch
         y_hat = self(x)
-
         loss = F.binary_cross_entropy(y_hat, y)
 
         self.log("val_loss", loss, prog_bar=True)
         self.log("val_f1", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
-        self.log("val_prec", self.p(y_hat > 0.5, y > 0.5), prog_bar=True)
-        self.log("val_rec", self.r(y_hat > 0.5, y > 0.5), prog_bar=True)
+        # self.log("val_prec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
+        # self.log("val_rec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
         return loss
 
     def test_step(self, batch, batch_idx):
-        x, y, end = batch
+        x, y = batch
         y_hat = self(x)
         loss = F.binary_cross_entropy(y_hat, y)
 
         self.log("test_loss", loss, prog_bar=True)
         self.log("test_f1", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
-        self.log("val_prec", self.p(y_hat > 0.5, y > 0.5), prog_bar=True)
-        self.log("val_rec", self.r(y_hat > 0.5, y > 0.5), prog_bar=True)
-
+        # self.log("val_prec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
+        # self.log("val_rec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
         return optimizer
 
 
@@ -227,29 +195,12 @@ def get_train_test_split(ecg_data, percent_train, percent_val):
     return random_split(ecg_data, [m_train, m_val, m_test])
 
 
-def plot(x, y, end, y_hat, i):
-    plt.clf()
-    # plt.subplot(2, 1, 1)
-    print(x.size())
-    print(x)
-    print(x[0, 0,:])
-    print(y_hat.size())
-    plt.plot(x[0, 0,:])
-    if end != -1:
-        plt.axvline(x=end, color='red')
-    # plt.subplot(2, 1, 2)
-    # plt.plot(y_hat.detach().numpy()[0,:])
-    # plt.ylabel('probability')
-    plt.xlabel(f'{y_hat.detach().numpy()}')
-    plt.savefig(f'experiments/plot_{i}.jpg')
-    print('saved!')
-    return 0
-
 if __name__ == '__main__':
     args = parser.parse_args()
     json_path = os.path.join(args.model_dir, 'params.json')
     utils.set_logger(os.path.join(args.model_dir, 'train.log'))
 
+    # Create the input data pipeline
     logging.info("Loading the datasets...")
 
     with open(args.data_meta_json) as f:
@@ -258,44 +209,10 @@ if __name__ == '__main__':
 
     SEED = 42
     pl.seed_everything(42, workers=True)
-
-    ecg_data_augment = ECGDataset(metadata, preloaded_data, transform=transform)
-    train_aug, _, _ = get_train_test_split(ecg_data_augment, 0.7, 0.2)
-
     ecg_data = ECGDataset(metadata, preloaded_data, transform=None)
-    _, val, test = get_train_test_split(ecg_data, 0.7, 0.2)
-    
-    afib = 0
-    for x, y, end in DataLoader(ecg_data):
-        if end != -1:
-            afib += 1 
-    logging.info(f"{afib} afib examples.")
-
-    
-
-    
-
-    logging.info(len(train_aug))
+    train, val, test = get_train_test_split(ecg_data, 0.7, 0.2)
+    logging.info(len(train))
     cnn_rnn = CNN_RNN({})
-    trainer = pl.Trainer(max_epochs=10, gpus=1, log_every_n_steps=5)
-
-    if False:
-        # Create the input data pipeline
-        # trainer.fit(cnn_rnn, DataLoader(train_aug, batch_size=50, num_workers=4), DataLoader(val, num_workers=4))
-        model = CNN_RNN.load_from_checkpoint("lightning_logs/version_39/checkpoints/epoch=9-step=169.ckpt", config={})
-        trainer.test(model, DataLoader(test))
-    else:
-        model = CNN_RNN.load_from_checkpoint("lightning_logs/version_39/checkpoints/epoch=9-step=169.ckpt", config={})
-        # results = trainer.test(model, DataLoader(val), verbose=True)
-        i = 0
-        predictions = []
-        for x, y, end in DataLoader(val):
-            i += 1
-            if i == 20: break
-            y_hat = model(torch.tensor(x))
-            predictions.append(y_hat)
-            plot(x, y, end, y_hat, i)
-        print(predictions)
-
-
-
+    trainer = pl.Trainer(max_epochs=5, gpus=1, log_every_n_steps=5)
+    trainer.fit(cnn_rnn, DataLoader(train, batch_size=50, num_workers=4), DataLoader(val, num_workers=4))
+    # trainer.test(cnn_rnn, DataLoader(test))

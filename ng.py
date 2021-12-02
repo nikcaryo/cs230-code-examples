@@ -149,8 +149,10 @@ class CNN_RNN(pl.LightningModule):
         super().__init__()
         self.metrics = {
             'val_loss': [],
+            'val_loss_adj': [],
             'train_loss': []
         }
+        self.lr = config['lr']
         self.f1 = torchmetrics.F1(num_classes=2, mdmc_average='global')
 
         self.conv1 = nn.Conv1d(2, 8, 3, padding=1, stride=1)
@@ -245,6 +247,7 @@ class CNN_RNN(pl.LightningModule):
         loss = F.binary_cross_entropy(y_hat, y)
         self.log("train_loss", loss, prog_bar=True, on_step=True)
         self.metrics['train_loss'].append(loss)
+        self.metrics['val_loss_adj'].append(self.metrics['val_loss'][-1])
 
 
         return loss
@@ -261,10 +264,6 @@ class CNN_RNN(pl.LightningModule):
         # self.log("val_rec", self.f1(y_hat > 0.5, y > 0.5), prog_bar=True)
         # metrics.append(trainer.callback_metrics)
         return loss
-
-    # def on_validation_epoch_end(self, trainer, pl_module):
-    #     each_me = copy.deepcopy(trainer.callback_metrics)
-    #     self.metrics.append(each_me)
 
     def test_step(self, batch, batch_idx):
         x, y, end = batch
@@ -293,7 +292,7 @@ class CNN_RNN(pl.LightningModule):
     #     tensorboard_logs = {'val_loss': avg_loss}
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # return optimizer
         scheduler1 = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience = 1)
         return {
@@ -353,7 +352,7 @@ if __name__ == '__main__':
     pl.seed_everything(42, workers=True)
     ecg_data = ECGDataset(metadata, preloaded_data, transform=None)
     train, val, test = get_train_test_split(ecg_data, 0.7, 0.2)
-    cnn_rnn = CNN_RNN({})
+    
     trainer = pl.Trainer(max_epochs=50, gpus=1, log_every_n_steps=1)
     afib = 0
     for x, y, end in DataLoader(ecg_data):
@@ -366,18 +365,29 @@ if __name__ == '__main__':
 
     if not args.model_path:
         # Create the input data pipeline
-        trainer.fit(cnn_rnn, DataLoader(train, batch_size=50, num_workers=4), DataLoader(val, num_workers=4))
-        # trainer.test(cnn_rnn, DataLoader(test))
-        print(cnn_rnn.metrics)
-        train_loss = cnn_rnn.metrics['train_loss']
-        val_loss = cnn_rnn.metrics['val_loss']
-        plt.clf()
-        plt.plot([loss.cpu().detach().numpy() for loss in train_loss], label='Train Loss')
-        plt.plot([loss.cpu().detach().numpy() for loss in val_loss], label='Val Loss')
-        plt.savefig('x.png')
+        for i, lr in enumerate([1e-3, 1e-4, 1e-5]):
+            cnn_rnn = CNN_RNN({'lr':lr})
+            trainer = pl.Trainer(max_epochs=100, gpus=1, log_every_n_steps=1)
+            trainer.fit(cnn_rnn, DataLoader(train, batch_size=50, num_workers=4), DataLoader(val, num_workers=4))
+            # trainer.test(cnn_rnn, DataLoader(test))
+            print(cnn_rnn.metrics)
+            train_loss = cnn_rnn.metrics['train_loss']
+            val_loss = cnn_rnn.metrics['val_loss_adj']
+            plt.clf()
+            # plt.subplot(2, 1, 1)
+            plt.plot(np.convolve([loss.cpu().detach().numpy() for loss in train_loss][1:-1], np.ones(1)/1), label='Train Loss')
+            # plt.subplot(2, 1, 2)
+            plt.plot(np.convolve([loss.cpu().detach().numpy() for loss in val_loss][1:-1], np.ones(1)/1), label='Val Loss')
+            logging.info(f'Big {lr}, 11110000 format')
+            logging.info([x.cpu().detach().numpy() for x in cnn_rnn.metrics['train_loss'][-5:]])
+            logging.info([x.cpu().detach().numpy() for x in cnn_rnn.metrics['val_loss_adj'][-5:]])
+            plt.xlabel('Batch (over 100 epochs)')
+            plt.ylabel('Loss (over 100 epochs)')
+            plt.title(f'LR = {lr}')
+            plt.savefig(f'x_{i}_lr.png')
     else:
         
-        model = CNN_RNN.load_from_checkpoint(args.model_path, config={})
+        model = CNN_RNN.load_from_checkpoint(args.model_path, config={'lr': 1e-4})
         # results = trainer.test(model, DataLoader(val), verbose=True)
         i = 0
         predictions = []
